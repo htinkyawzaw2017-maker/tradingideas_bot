@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+chrome_driver/ 
+error_screenshot.png
+posted_ideas_links.txt
