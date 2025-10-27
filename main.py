@@ -1,4 +1,4 @@
-# main.py (RSS Feed, Advanced Reply Logic)
+# main.py (RSS General Feed + Filter Version)
 
 import requests
 import time
@@ -19,13 +19,14 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 # config.py file ထဲက setting တွေကို import လုပ်ခြင်း
 try:
-    from config import BOT_TOKEN 
+    from config import BOT_TOKEN
 except ImportError:
     print("Error: config.py file ကို ရှာမတွေ့ပါ (သို့) BOT_TOKEN မရှိပါ။")
     exit()
 
 # --- Settings ---
-TRADINGVIEW_SYMBOL_IDEAS_FEED_BASE_URL = "https://www.tradingview.com/symbols/{symbol}/ideas/feed/"
+# !!! --- General Crypto Feed URL ကိုပဲ သုံးပါတော့မယ် --- !!!
+TRADINGVIEW_GENERAL_CRYPTO_FEED_URL = "https://www.tradingview.com/markets/cryptocurrencies/ideas/feed/"
 TIME_FILTER_SECONDS = 86400 # 1 ရက် (seconds)
 
 # --- Global Variables ---
@@ -44,30 +45,22 @@ if os.name == 'nt':
 # --- Helper Functions ---
 def clean_html(raw_html):
     """HTML tags တွေကို ဖယ်ရှားပြီး text ကို ရှင်းလင်း"""
-    if not raw_html:
-        return ""
+    if not raw_html: return ""
     try:
         soup = BeautifulSoup(raw_html, "html.parser")
         text = soup.get_text(separator=" ")
-        # Multiple spaces/newlines တွေကို single space ပြောင်း
         text = re.sub(r'\s+', ' ', text).strip()
         return text
-    except Exception:
-        return raw_html # Error တက်ရင် မူရင်းအတိုင်း ပြန်ပေး
+    except Exception: return raw_html
 
 def infer_position(title, summary):
     """Title နဲ့ Summary ထဲက keywords တွေ ကြည့်ပြီး Long/Short ခန့်မှန်း"""
     text_lower = (title + " " + summary).lower()
-    is_long = any(word in text_lower for word in ['long', 'bull', 'buy', 'up', 'bounce', 'rally', 'breakout'])
-    is_short = any(word in text_lower for word in ['short', 'bear', 'sell', 'down', 'reject', 'drop', 'breakdown'])
-
-    if is_long and not is_short:
-        return "Long", "🟢"
-    elif is_short and not is_long:
-        return "Short", "🔴"
-    else:
-        # Conflicting or no keywords
-        return "Unknown", "⚪️" # Neutral or Unknown
+    is_long = any(word in text_lower for word in ['long', 'bull', 'buy', 'up', 'bounce', 'rally', 'breakout', 'target', 'support'])
+    is_short = any(word in text_lower for word in ['short', 'bear', 'sell', 'down', 'reject', 'drop', 'breakdown', 'resistance'])
+    if is_long and not is_short: return "Long", "🟢"
+    elif is_short and not is_long: return "Short", "🔴"
+    else: return "Unknown", "⚪️"
 
 def extract_image_url(entry):
     """Entry ထဲက image URL ကို ရှာဖွေ (Enclosure or Summary)"""
@@ -75,48 +68,40 @@ def extract_image_url(entry):
     if 'enclosures' in entry and entry.enclosures and entry.enclosures[0].get('url'):
         image_url = entry.enclosures[0].get('url')
     elif 'summary' in entry:
-        # Summary (HTML) ထဲက ပထမဆုံး img tag ကို ရှာကြည့်မယ် (bs4 သုံးပြီး)
         try:
             soup = BeautifulSoup(entry.summary, "html.parser")
             img_tag = soup.find('img')
-            if img_tag and img_tag.get('src'):
-                image_url = img_tag.get('src')
-        except Exception:
-            pass # Parsing error ဖြစ်ရင် ကျော်ပါ
-
-    # Relative URL ဖြစ်နေရင် domain ပေါင်းပေးမယ်
-    if image_url and image_url.startswith('/'):
-        image_url = "https://www.tradingview.com" + image_url
-    # Image URL မှန်မမှန် အခြေခံ စစ်ဆေးမှု (အလုပ်မလုပ်နိုင်တဲ့ base64 data:image တွေကို ဖယ်ရှား)
-    if image_url and not image_url.startswith('http'):
-        image_url = None 
+            if img_tag and img_tag.get('src'): image_url = img_tag.get('src')
+        except Exception: pass
+    if image_url and image_url.startswith('/'): image_url = "https://www.tradingview.com" + image_url
+    if image_url and not image_url.startswith('http'): image_url = None
     return image_url
 
 # -----------------------------------------------------------------
-# --- RSS Feed Fetcher Function ---
+# --- RSS Feed Fetcher Function (General Feed + Filter) ---
 # -----------------------------------------------------------------
-def fetch_and_parse_feed(symbol: str):
-    """Specific symbol အတွက် RSS Feed ကို fetch လုပ်ပြီး ideas တွေကို parse လုပ်မယ်"""
-    target_url = TRADINGVIEW_SYMBOL_IDEAS_FEED_BASE_URL.format(symbol=symbol.upper())
-    logger.info(f"Fetching RSS feed for symbol: {symbol.upper()} from {target_url}")
-    headers = {'User-Agent': 'Mozilla/5.0'} # Simple user agent
+def fetch_and_parse_feed(requested_symbols: list): # <-- Symbol list ကို လက်ခံမယ်
+    """General crypto feed ကို fetch လုပ်ပြီး တောင်းဆိုထားတဲ့ symbols အတွက် filter လုပ်မယ်"""
+    target_url = TRADINGVIEW_GENERAL_CRYPTO_FEED_URL
+    log_symbols = ",".join(requested_symbols)
+    logger.info(f"Fetching GENERAL crypto RSS feed from {target_url} to filter for symbols: [{log_symbols}]")
+    headers = {'User-Agent': 'Mozilla/5.0'}
 
     fetched_ideas = []
     try:
-        response = requests.get(target_url, headers=headers, timeout=20) # Timeout တိုးထား
-        response.raise_for_status() 
-
+        response = requests.get(target_url, headers=headers, timeout=20)
+        response.raise_for_status()
         feed = feedparser.parse(response.content)
 
         if feed.bozo:
-            logger.warning(f"Error parsing feed for {symbol.upper()}: {feed.bozo_exception}")
+            logger.warning(f"Error parsing general feed: {feed.bozo_exception}")
             return None # Error signal
 
         if not feed.entries:
-            logger.info(f"No entries found in RSS feed for {symbol.upper()}.")
+            logger.info("No entries found in general crypto RSS feed.")
             return [] # Idea မရှိရင် list အလွတ် ပြန်
 
-        logger.info(f"Found {len(feed.entries)} entries in feed for {symbol.upper()}.")
+        logger.info(f"Found {len(feed.entries)} total entries in general feed.")
 
         now_utc = datetime.now(timezone.utc)
         time_threshold = now_utc - timedelta(seconds=TIME_FILTER_SECONDS)
@@ -126,75 +111,75 @@ def fetch_and_parse_feed(symbol: str):
             published_dt_utc = None
             if published_time_struct:
                 try:
-                    # struct_time ကို UTC datetime object ပြောင်းပါ
                     published_dt_utc = datetime.fromtimestamp(time.mktime(published_time_struct), timezone.utc)
                 except (TypeError, ValueError):
                      logger.warning(f"Could not parse date for entry: {entry.get('title')}")
-                     continue # Date parse မလုပ်နိုင်ရင် ကျော်ပါ
+                     continue
 
-                # ၂၄ နာရီအတွင်း ဟုတ်မဟုတ် စစ်ဆေးပါ
+                # --- !!! အဓိက Filtering Logic !!! ---
+                # ၁) ၂၄ နာရီအတွင်း ဟုတ်မဟုတ် စစ်ဆေးပါ
                 if published_dt_utc >= time_threshold:
-                    summary_text = clean_html(entry.get('summary', ''))
-                    position, position_emoji = infer_position(entry.get('title',''), summary_text)
-                    image_url = extract_image_url(entry)
+                    entry_title_upper = entry.get('title', '').upper()
+                    entry_link_upper = entry.get('link', '').upper()
                     
-                    fetched_ideas.append({
-                        'title': entry.get('title', 'N/A'),
-                        'symbol': symbol.upper(),
-                        'type': position, # Inferred position
-                        'position_emoji': position_emoji,
-                        'likes_count': 0, # Not available
-                        'published_time': time.mktime(published_time_struct),
-                        'image_url': image_url, 
-                        'full_link': entry.get('link', ''),
-                        'summary': summary_text # Cleaned summary
-                    })
-                # else: 
-                    # logger.debug(f"Idea older than 24h: {entry.get('title')}")
+                    # ၂) တောင်းဆိုထားတဲ့ symbol တစ်ခုခုနဲ့ ကိုက်ညီမှု ရှိမရှိ စစ်ဆေးပါ
+                    matched_symbol = None
+                    for req_sym in requested_symbols:
+                        # Title မှာ "BTCUSDT" or "BTC/USDT" or "BITCOIN" စသဖြင့် ပါသလား?
+                        # Link ထဲမှာ "/BTCUSDT/" ပါသလား? (ဒါက ပိုသေချာနိုင်)
+                        if f"/{req_sym}/" in entry_link_upper or req_sym in entry_title_upper:
+                             matched_symbol = req_sym
+                             break # ကိုက်ညီတာ တွေ့ရင် loop က ထွက်
+
+                    if matched_symbol:
+                        # ကိုက်ညီမှု ရှိမှ idea ကို process လုပ်ပါ
+                        summary_text = clean_html(entry.get('summary', ''))
+                        position, position_emoji = infer_position(entry.get('title',''), summary_text)
+                        image_url = extract_image_url(entry)
+
+                        fetched_ideas.append({
+                            'title': entry.get('title', 'N/A'),
+                            'symbol': matched_symbol, # ကိုက်ညီတဲ့ symbol ကို ထည့်
+                            'type': position,
+                            'position_emoji': position_emoji,
+                            'likes_count': 0,
+                            'published_time': time.mktime(published_time_struct),
+                            'image_url': image_url,
+                            'full_link': entry.get('link', ''),
+                            'summary': summary_text
+                        })
+                # --- !!! Filtering Logic ပြီးဆုံးပါပြီ !!! ---
 
         # Sort by published time, most recent first
         fetched_ideas.sort(key=lambda x: x['published_time'], reverse=True)
-        logger.info(f"Found {len(fetched_ideas)} ideas within the last 24 hours for {symbol.upper()}.")
+        logger.info(f"Filtered {len(fetched_ideas)} ideas for symbols [{log_symbols}] within the last 24 hours.")
         return fetched_ideas
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"Error fetching RSS feed for {symbol.upper()}: {e}")
-        if hasattr(e, 'response') and e.response is not None and e.response.status_code == 404:
-             logger.warning(f"Received 404, symbol {symbol.upper()} likely not found.")
-             return [] 
-        return None 
+        logger.error(f"Error fetching general crypto RSS feed: {e}")
+        return None # Network error ဆို None ပြန်
     except Exception as e:
-        logger.error(f"Unexpected error processing feed for {symbol.upper()}: {e}", exc_info=True)
-        return None 
+        logger.error(f"Unexpected error processing general feed: {e}", exc_info=True)
+        return None # တခြား Error ဆို None ပြန်
 
-# --- (format_message_caption function - Screenshot နဲ့ တူအောင် ပြင်ထား) ---
+# --- (format_message_caption function - No changes needed) ---
 def format_message_caption(idea):
     title = idea.get('title', 'N/A')
     symbol = idea.get('symbol', 'N/A')
     idea_type = idea.get('type', 'Unknown')
     position_emoji = idea.get('position_emoji', '⚪️')
-    # likes = idea.get('likes_count', 0) # RSS မှာ မပါ
     timestamp = idea.get('published_time', time.time())
-    # Format date like "2025-10-27 15:35"
     date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
 
-    # Screenshot format
     caption = f"<b>{symbol} Idea 🔥</b>\n\n"
     caption += f"<b>Title:</b> {title}\n"
     caption += f"<b>Position:</b> {idea_type} {position_emoji}\n"
-    # caption += f"<b>Likes:</b> {likes} 🚀\n" # Likes မပါ
-    caption += f"<b>Date:</b> {date_str} 🗓️" # Newline မပါ
+    caption += f"<b>Date:</b> {date_str} 🗓️"
     return caption
 
-# --- Channel ထဲ ပို့တဲ့ Function (Commented out) ---
-# def send_to_telegram(idea):
-#     # ... (code from previous version) ...
-#     pass
-
 # -----------------------------------------------------------------
-# --- Bot Logic (RSS, Reply Logic အသစ်) ---
+# --- Bot Logic (General Feed Version) ---
 # -----------------------------------------------------------------
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/start command - အသုံးပြုနည်း ရှင်းပြ"""
     user = update.message.from_user
@@ -213,88 +198,66 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def idea_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/idea command ကို လက်ခံပြီး၊ symbol ခွဲ၊ feed ကို fetch၊ User ကို reply ပြန်"""
+    """/idea command ကို လက်ခံပြီး၊ general feed ကို fetch/filter၊ User ကို reply ပြန်"""
     user = update.message.from_user
     chat_id = update.message.chat_id
 
     if not context.args:
+        # ... (Argument မပါရင် error ပြန်တာ အရင်အတိုင်း) ...
         logger.warning(f"User {user.id} called /idea without arguments.")
         await update.message.reply_text("ကျေးဇူးပြု၍ Symbol တစ်ခု သို့မဟုတ် တစ်ခုထက်ပို၍ (ကော်မာခံပြီး) ထည့်ပေးပါ။\nဥပမာ: `/idea BTCUSDT` သို့မဟုတ် `/idea BTCUSDT,ETHUSDT`", parse_mode='Markdown')
         return
 
-    # Symbol တွေကို ကော်မာ (,) နဲ့ ခွဲထုတ်ပါ၊ space တွေကို ဖယ်ပါ
     symbols_input = "".join(context.args)
     symbols_to_fetch = [s.strip().upper() for s in symbols_input.split(',') if s.strip()]
 
     if not symbols_to_fetch:
+        # ... (Symbol အလွတ်ဖြစ်နေရင် error ပြန်တာ အရင်အတိုင်း) ...
         logger.warning(f"User {user.id} provided empty symbols.")
         await update.message.reply_text("Symbol များ မှားယွင်းနေပါသည်။\nဥပမာ: `/idea BTCUSDT`", parse_mode='Markdown')
         return
-        
+
     log_symbols = ",".join(symbols_to_fetch)
     logger.info(f"/idea command received for symbols: [{log_symbols}] from user {user.id} ({user.username})")
 
     global IS_CURRENTLY_FETCHING
     if IS_CURRENTLY_FETCHING:
+        # ... (Cooldown အရင်အတိုင်း) ...
         logger.warning(f"Fetcher is already running. User {user.id} tried to call /idea [{log_symbols}].")
         await update.message.reply_text("Bot သည် ယခုလက်ရှိ အခြား request တစ်ခုကို လုပ်ဆောင်နေပါသည်။ ပြီးဆုံးမှ နောက်တစ်ကြိမ် ပြန်လည် ကြိုးစားပါ။")
         return
 
-    # Determine if single or multiple symbols requested (for logic later)
     is_single_symbol_request = len(symbols_to_fetch) == 1
 
     try:
         IS_CURRENTLY_FETCHING = True
         await update.message.reply_text(f"`{log_symbols}` အတွက် TradingView Ideas များကို ရှာဖွေနေပါသည်။ ခဏစောင့်ပါ...", parse_mode='Markdown')
 
-        all_recent_ideas = []
-        fetch_successful = True
-        
-        # --- Symbol တစ်ခုချင်းစီအတွက် Feed ကို fetch လုပ်ပါ ---
-        for symbol in symbols_to_fetch:
-            logger.info(f"Calling feed fetcher for {symbol} in a separate thread...")
-            # fetch_and_parse_feed က list (ideas) or [] or None ပြန်ပေးမယ်
-            ideas_list = await asyncio.to_thread(fetch_and_parse_feed, symbol)
-            logger.info(f"Feed fetcher for {symbol} finished.")
+        # --- !!! Feed Fetcher ကို Thread သီးသန့်မှာ ခေါ်ပါ (Symbol list ပေးပြီး) !!! ---
+        logger.info(f"Calling feed fetcher for symbols [{log_symbols}] in a separate thread...")
+        all_recent_ideas = await asyncio.to_thread(fetch_and_parse_feed, symbols_to_fetch) # <-- symbol list ပေးလိုက်
+        logger.info(f"Feed fetcher for [{log_symbols}] finished.")
 
-            if ideas_list is None: # Fetch/Parse မှာ Error တက်ခဲ့ရင်
-                 logger.error(f"Feed fetcher failed critically for symbol {symbol}.")
-                 # User ကို အသိပေးပြီး ဆက်လုပ်မလား၊ ရပ်မလား? လောလောဆယ် ဆက်လုပ်မယ်။
-                 fetch_successful = False
-                 await update.message.reply_text(f"⚠️ `{symbol}` အတွက် Feed ကို ရယူရာတွင် Error ဖြစ်သွားပါသည်။", parse_mode='Markdown')
-                 continue # နောက် symbol ကို ဆက် fetch
-            elif ideas_list: # ideas တွေ့ရင် all_recent_ideas list ထဲ ပေါင်းထည့်
-                all_recent_ideas.extend(ideas_list)
-        
-        # Fetching အားလုံး ပြီးဆုံး
-        if not fetch_successful and not all_recent_ideas:
-             # Critical error တွေပဲ ကြုံခဲ့ပြီး idea လုံးဝ မရရင်
-             await update.message.reply_text(f"တောင်းဆိုထားသော Symbol များအတွက် Idea များ ရယူရာတွင် အမှားအယွင်းများ ဖြစ်ပေါ်ခဲ့ပါသည်။")
+        # --- Fetcher အဖြေကို စစ်ဆေးပါ ---
+        if all_recent_ideas is None: # Fetch/Parse မှာ Error တက်ခဲ့ရင်
+             logger.error(f"Feed fetcher failed critically for symbols [{log_symbols}].")
+             await update.message.reply_text(f"တောင်းဆိုထားသော Symbol များအတွက် Feed ကို ရယူရာတွင် Error ဖြစ်သွားပါသည်။", parse_mode='Markdown')
              return
-
-        if not all_recent_ideas:
-            logger.info(f"No recent ideas found for any requested symbols: [{log_symbols}].")
+        elif not all_recent_ideas: # List အလွတ် (Idea မရှိတာ၊ Filter လုပ်လို့ မကျန်တာ)
+            logger.info(f"Feed fetcher returned no matching ideas for symbols [{log_symbols}].")
             await update.message.reply_text(f"တောင်းဆိုထားသော Symbol များ (`{log_symbols}`) အတွက် နောက်ဆုံး ၂၄ နာရီအတွင်း idea အသစ်များ ရှာမတွေ့ပါ။", parse_mode='Markdown')
             return
 
-        # Sort all collected ideas by time, most recent first
-        all_recent_ideas.sort(key=lambda x: x['published_time'], reverse=True)
-        
-        # --- User ကို Reply ပြန်ပို့ခြင်း Logic ---
+        # --- User ကို Reply ပြန်ပို့ခြင်း Logic (အရင်အတိုင်းနီးပါး) ---
         ideas_to_send = []
         if is_single_symbol_request:
-            # Single symbol တောင်းရင် နောက်ဆုံး တစ်ခုပဲ ယူ
-            ideas_to_send = all_recent_ideas[:1] 
+            ideas_to_send = all_recent_ideas[:1] # Sort ပြီးသားမို့ ပထမဆုံး එකက နောက်ဆုံး එක
             count_text = "နောက်ဆုံး idea"
-            found_count = 1 if ideas_to_send else 0
         else:
-            # Multiple symbols တောင်းရင် အကုန်ယူ
             ideas_to_send = all_recent_ideas
             count_text = f"နောက်ဆုံး ၂၄ နာရီအတွင်း idea {len(ideas_to_send)} ခု"
-            found_count = len(ideas_to_send)
 
         if not ideas_to_send:
-             # ဒါက single symbol တောင်းပြီး filter လုပ်လို့ မကျန်တော့တဲ့ case မှာ ဖြစ်နိုင်
              await update.message.reply_text(f"`{log_symbols}` အတွက် နောက်ဆုံး ၂၄ နာရီအတွင်း idea အသစ်များ ရှာမတွေ့ပါ။", parse_mode='Markdown')
              return
 
@@ -309,20 +272,18 @@ async def idea_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             try:
-                if image_url: # Image URL ရှိမှ ပုံနဲ့ပို့
+                if image_url:
                     logger.info(f"Replying with photo for {idea['symbol']} to user {user.id}: {idea.get('title')}")
-                    await update.message.reply_photo(
-                        photo=image_url, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup )
-                else: # Image မပါရင် စာသား သက်သက်ပဲ ပို့မယ်
+                    await update.message.reply_photo( photo=image_url, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup )
+                else:
                     logger.info(f"Replying with text (no image) for {idea['symbol']} to user {user.id}: {idea.get('title')}")
-                    await update.message.reply_text(
-                        text=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=False)
+                    await update.message.reply_text( text=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=False)
                 sent_count += 1
-                await asyncio.sleep(1.5) # Message တွေ ဆက်တိုက် မပို့အောင် နည်းနည်း နား
+                await asyncio.sleep(1.5)
 
             except TelegramError as e:
                 logger.error(f"Error replying to user {user.id} for idea '{idea.get('title')}': {e}")
-                try: # Error တက်ရင် စာသားပဲ ထပ်ပို့ကြည့်မယ်
+                try:
                     error_caption = caption + f"\n\n<i>(Media ကို ပို့ရာတွင် အမှားအယွင်း ရှိခဲ့နိုင်ပါသည်။)</i>"
                     await update.message.reply_text( text=error_caption, parse_mode=ParseMode.HTML,
                         reply_markup=reply_markup, disable_web_page_preview=True)
@@ -330,7 +291,6 @@ async def idea_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e2: logger.error(f"Error sending text fallback reply: {e2}")
 
         logger.info(f"Finished processing /idea [{log_symbols}] for user {user.id}. Sent {sent_count} replies.")
-        # Confirmation message ထပ်မပို့တော့
 
     except Exception as e:
         logger.error(f"Error in /idea command handler for [{log_symbols}]: {e}", exc_info=True)
