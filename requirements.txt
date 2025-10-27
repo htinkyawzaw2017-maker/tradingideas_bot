@@ -1,11 +1,5 @@
 python-telegram-bot
-feedparser
 requests
-httpx
+selenium
 beautifulsoup4
-
-
-
-# first need run
-# 
-# pip install python-telegram-bot feedparser requests httpx beautifulsoup4 # BeautifulSoup ကို HTML parse လုပ်ဖို့ ထပ်ထည့်မယ်
+httpx
